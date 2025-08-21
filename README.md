@@ -1,11 +1,9 @@
 # nezha-fake-agent-installer
 
-update：
-2025-08-19/更新了查看状态和重启和关闭服务/可以批量和单独修改配置
-想要多少服务器就有多少服务器，在朋友面前再也不会抬不起头来了
-
-
 一键安装/卸载 Fake Nezha Agent 的 Shell 脚本，支持自动解析面板命令、交互式自定义伪造数据，并使用 systemd 持久化运行。
+
+**Update**
+- [2025-08-19 更新了查看状态和重启和关闭服务，可以批量和单独修改配置，想要多少服务器就有多少服务器，在朋友面前再也不会抬不起头来了](https://github.com/k08255-lxm/nezha-fake-agent-installer/pull/1)
 
 # Fake Nezha Agent 一键安装脚本
 
