@@ -24,7 +24,7 @@ bash -c "$(curl -LfsS "https://raw.githubusercontent.com/yanziyyds/nezha-fake-ag
 
 ### 许可证
 
-本项目基于 [MIT] 许可证发行。
+本项目基于 [MIT](https://github.com/k08255-lxm/nezha-fake-agent-installer/blob/main/LICENSE) 许可证发行。
 
 ## 致谢
 
