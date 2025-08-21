@@ -1,235 +1,315 @@
 #!/bin/bash
+#=================================================================
+# Fake Nezha Agent 批量管理脚本（增强版：支持自定义修改配置 + 批量修改优化）
+#=================================================================
 
-#================================================================================
-# Fake Nezha Agent 一键安装/卸载脚本 (开机自启稳定版)
-#
-# 作者: Gemini
-# 版本: v1.0.0
-#================================================================================
-
-# --- 全局变量和颜色定义 ---
-red='\033[0;31m'
-green='\033[0;32m'
-yellow='\033[0;33m'
-plain='\033[0m'
-
-# 会话名称
-SESSION_NAME="nezha-fake"
-# 安装路径
-INSTALL_PATH="/opt/nezha-fake"
-# Agent 程序下载URL模板
-AGENT_URL_TEMPLATE="https://github.com/dysf888/fake-nezha-agent-v1/releases/latest/download/nezha-agent-fake_{os}_{arch}.zip"
-
-# --- 工具函数 ---
-
+red='\033[0;31m'; green='\033[0;32m'; yellow='\033[0;33m'; plain='\033[0m'
 err() { echo -e "${red}[错误] $1${plain}"; }
 success() { echo -e "${green}[成功] $1${plain}"; }
 info() { echo -e "${yellow}[信息] $1${plain}"; }
 
-check_root() {
-    if [[ $EUID -ne 0 ]]; then
-        err "本脚本需要以 root 权限运行！"
-        exit 1
-    fi
-}
+check_root() { [[ $EUID -ne 0 ]] && err "请以 root 权限运行！" && exit 1; }
 
-# 检查并安装依赖 (包含 screen)
 check_and_install_deps() {
-    info "正在检查并安装所需依赖 (curl, unzip, screen, cron)..."
-    local deps_to_install=()
-    # 检查 cron/crontab 是否存在
-    if ! command -v crontab >/dev/null 2>&1; then
-        if command -v apt-get >/dev/null 2>&1; then
-            deps_to_install+=("cron")
-        elif command -v yum >/dev/null 2>&1 || command -v dnf >/dev/null 2>&1; then
-            deps_to_install+=("cronie")
-        fi
-    fi
-
     for dep in curl unzip screen; do
-        if ! command -v "$dep" >/dev/null 2>&1; then
-            deps_to_install+=("$dep")
-        fi
+        command -v $dep >/dev/null 2>&1 || {
+            info "$dep 未安装，正在安装..."
+            if command -v apt-get >/dev/null 2>&1; then apt-get update && apt-get install -y $dep
+            elif command -v yum >/dev/null 2>&1; then yum install -y $dep
+            elif command -v dnf >/dev/null 2>&1; then dnf install -y $dep
+            else err "无法自动安装依赖 $dep"; exit 1; fi
+        }
     done
-
-    if [ ${#deps_to_install[@]} -eq 0 ]; then
-        success "所有依赖均已安装。"
-        return
-    fi
-
-    info "检测到未安装的依赖: ${deps_to_install[*]}"
-    
-    if command -v apt-get >/dev/null 2>&1; then
-        info "正在使用 apt-get 安装..."
-        apt-get update -y
-        if ! apt-get install -y "${deps_to_install[@]}"; then
-             err "依赖安装失败，请检查您的软件源设置！"; exit 1
-        fi
-    elif command -v yum >/dev/null 2>&1; then
-        info "正在使用 yum 安装..."
-        if ! yum install -y "${deps_to_install[@]}"; then
-             err "依赖安装失败！"; exit 1
-        fi
-    elif command -v dnf >/dev/null 2>&1; then
-        info "正在使用 dnf 安装..."
-        if ! dnf install -y "${deps_to_install[@]}"; then
-             err "依赖安装失败！"; exit 1
-        fi
-    else
-        err "未找到可用的包管理器 (apt/yum/dnf)。请手动安装: ${deps_to_install[*]}"; exit 1
-    fi
-    success "依赖安装成功！"
+    success "依赖检查完成"
 }
 
 detect_arch() {
-    case "$(uname -s)" in Linux) os="linux";; *) err "不支持的操作系统: $(uname -s)"; exit 1;; esac
-    case "$(uname -m)" in x86_64|amd64) arch="amd64";; aarch64|arm64) arch="arm64";; i386|i686) arch="386";; *arm*) arch="arm";; *) err "不支持的架构: $(uname -m)"; exit 1;; esac
-    AGENT_URL=$(echo "$AGENT_URL_TEMPLATE" | sed "s/{os}/$os/" | sed "s/{arch}/$arch/")
-    AGENT_ZIP_NAME="nezha-agent-fake_${os}_${arch}.zip"
+    case "$(uname -s)" in Linux) os="linux";; *) err "不支持系统: $(uname -s)"; exit 1;; esac
+    case "$(uname -m)" in
+        x86_64|amd64) arch="amd64";;
+        aarch64|arm64) arch="arm64";;
+        i386|i686) arch="386";;
+        *arm*) arch="arm";;
+        *) err "不支持架构: $(uname -m)"; exit 1;;
+    esac
+    AGENT_URL="https://gh-proxy.com/https://github.com/dysf888/fake-nezha-agent-v1/releases/latest/download/nezha-agent-fake_linux_amd64.zip"
 }
 
-get_server_config() {
-    info "请选择如何提供面板连接信息："; echo "1) 粘贴从面板获取的完整一键安装命令 (推荐)"; echo "2) 手动输入服务器地址、端口和密钥"
-    read -rp "请输入选项 [1-2]: " choice
-    if [[ "$choice" == "1" ]]; then
-        read -rp "请粘贴命令: " full_cmd
-        NZ_SERVER=$(echo "$full_cmd" | grep -oP 'NZ_SERVER=\K[^ ]+')
-        NZ_CLIENT_SECRET=$(echo "$full_cmd" | grep -oP 'NZ_CLIENT_SECRET=\K[^ ]+')
-        NZ_TLS_RAW=$(echo "$full_cmd" | grep -oP 'NZ_TLS=\K[^ ]+')
-        if [[ "$NZ_TLS_RAW" == "true" ]]; then NZ_TLS="true"; else NZ_TLS="false"; fi
-        if [[ -z "$NZ_SERVER" || -z "$NZ_CLIENT_SECRET" ]]; then err "无法从您粘贴的命令中解析出必要信息。"; exit 1; fi
-    elif [[ "$choice" == "2" ]]; then
-        read -rp "请输入面板服务器地址: " NZ_SERVER_HOST; read -rp "请输入面板服务器端口: " NZ_SERVER_PORT; read -rp "请输入面板密钥: " NZ_CLIENT_SECRET; read -rp "是否启用 TLS (SSL) [y/n] (默认: n): " NZ_TLS_CHOICE
-        NZ_SERVER="${NZ_SERVER_HOST}:${NZ_SERVER_PORT}"; [[ "$NZ_TLS_CHOICE" == "y" || "$NZ_TLS_CHOICE" == "Y" ]] && NZ_TLS="true" || NZ_TLS="false"
-    else err "无效的选项。"; exit 1; fi
-    success "面板信息获取成功！"
+parse_install_cmd() {
+    read -rp "请粘贴哪吒面板一键安装命令: " full_cmd
+    NZ_SERVER=$(echo "$full_cmd" | grep -oP 'NZ_SERVER=\K[^ ]+')
+    NZ_CLIENT_SECRET=$(echo "$full_cmd" | grep -oP 'NZ_CLIENT_SECRET=\K[^ ]+')
+    NZ_TLS_RAW=$(echo "$full_cmd" | grep -oP 'NZ_TLS=\K[^ ]+')
+    [[ "$NZ_TLS_RAW" == "true" ]] && NZ_TLS="true" || NZ_TLS="false"
+    [[ -z "$NZ_SERVER" || -z "$NZ_CLIENT_SECRET" ]] && err "解析失败，请确认粘贴命令正确" && exit 1
+    success "解析完成：NZ_SERVER=$NZ_SERVER, NZ_CLIENT_SECRET=$NZ_CLIENT_SECRET, NZ_TLS=$NZ_TLS"
 }
 
-get_fake_config() {
-    info "现在开始配置伪造数据，直接回车将使用默认值。"
-    read -rp "请输入伪造的CPU型号 [默认: HUAWEI Kirin 9000sm 256 Physical Core]: " FAKE_CPU
-    read -rp "请输入伪造的架构 [默认: taishan64]: " FAKE_ARCH
-    read -rp "请输入伪造的操作系统 [默认: HarmonyOS NEXT]: " FAKE_PLATFORM
-    read -rp "请输入伪造的磁盘总大小(Byte) [默认: 219902325555200]: " FAKE_DISK_TOTAL
-    read -rp "请输入伪造的内存总大小(Byte) [默认: 549755813888]: " FAKE_MEM_TOTAL
-    read -rp "请输入真实磁盘使用量的倍数 [默认: 10]: " FAKE_DISK_MULTI
-    read -rp "请输入真实内存使用量的倍数 [默认: 20]: " FAKE_MEM_MULTI
-    read -rp "请输入真实网络流量的倍数 [默认: 1000]: " FAKE_NET_MULTI
-    read -rp "请输入伪造的IP地址 [默认: 1.1.1.1]: " FAKE_IP
+random_choice() { local arr=("$@"); echo "${arr[$RANDOM % ${#arr[@]}]}"; }
+random_disk() { echo $(( (RANDOM % 65 + 64) * 1024 * 1024 * 1024 )); }
+random_mem()  { echo $(( (RANDOM % 65 + 64) * 1024 * 1024 * 1024 )); }
+random_multiplier() { local min=$1 max=$2; echo $((RANDOM % (max - min + 1) + min)); }
+random_traffic() { echo $(( (RANDOM % 500 + 100) * 1024 * 1024 * 1024 )); }
+
+IP_RANGES=(
+"US:3.0.0.0 3.255.255.255"
+"CN:36.0.0.0 36.255.255.255"
+"DE:80.0.0.0 80.255.255.255"
+"FR:51.0.0.0 51.255.255.255"
+"JP:133.0.0.0 133.255.255.255"
+"BR:200.0.0.0 200.255.255.255"
+)
+
+ip2int() { local IFS=.; read -r a b c d <<< "$1"; echo $(( (a<<24) + (b<<16) + (c<<8) + d )); }
+int2ip() { local ip=$1; echo "$(( (ip>>24)&255 )).$(( (ip>>16)&255 )).$(( (ip>>8)&255 )).$(( ip&255 ))"; }
+generate_geoip_ip() {
+    local range=${IP_RANGES[$RANDOM % ${#IP_RANGES[@]}]}
+    local ips=${range#*:}
+    local start_ip=${ips%% *}
+    local end_ip=${ips##* }
+    local start_int=$(ip2int "$start_ip")
+    local end_int=$(ip2int "$end_ip")
+    int2ip $((RANDOM % (end_int - start_int + 1) + start_int))
 }
 
-# 彻底清理旧环境
-cleanup_old_install() {
-    info "正在进行彻底清理，确保一个干净的环境..."
-    # 强制杀死可能存在的 screen 会话
-    if screen -ls | grep -q "$SESSION_NAME"; then
-        info "发现旧的 screen 会话，正在终止..."
-        screen -S "$SESSION_NAME" -X quit
-    fi
-    # 删除旧的安装目录
-    rm -rf "$INSTALL_PATH"
-    # 清理旧的 systemd 服务
-    rm -f /etc/systemd/system/nezha-fake-agent.service >/dev/null 2>&1
-    systemctl daemon-reload
-    # 清理 crontab 中的旧条目
-    (crontab -l 2>/dev/null | grep -v "${INSTALL_PATH}" | crontab -)
-    success "清理完成！"
+CPU_LIST=(
+"Intel Xeon E5-2680" "Intel Xeon E5-2690" "Intel Xeon Platinum 8168" "Intel Xeon Platinum 8259CL"
+"Intel Xeon Platinum 8369B" "AMD EPYC 7302" "AMD EPYC 7402" "AMD EPYC 7502" "AMD EPYC 7742"
+"AMD EPYC 9654" "AMD Ryzen 9 5950X" "AMD Ryzen Threadripper 3970X" "Intel Core i9-10980XE"
+"Intel Core i7-10700K" "Intel Core i5-10600K"
+)
+PLATFORM_LIST=("CentOS 7.9" "Ubuntu 20.04" "Ubuntu 22.04" "Debian 10" "Debian 11")
+
+download_agent() {
+    local url="$1"; local dest="$2"; local retries=5; local count=0
+    while [[ $count -lt $retries ]]; do
+        info "下载 Agent: $url (尝试 $((count+1))/$retries)"
+        curl -fL -o "$dest" "$url" && break
+        count=$((count+1)); sleep 2
+    done
+    unzip -t "$dest" >/dev/null 2>&1 || { err "ZIP 文件无效或损坏"; rm -f "$dest"; exit 1; }
+    success "Agent 下载验证成功"
 }
 
-# 安装 Agent
-install_agent() {
-    info "开始安装 Fake Nezha Agent..."
-    check_root
-    check_and_install_deps
-    
-    # 先执行彻底清理
-    cleanup_old_install
+cleanup_instance() {
+    local idx=$1
+    rm -rf "/opt/nezha-fake-$idx"
+    rm -f "/etc/systemd/system/nezha-fake-agent-$idx.service"
+    systemctl daemon-reload >/dev/null 2>&1
+}
 
-    detect_arch
-    get_server_config
-    get_fake_config
-    
-    info "正在从 GitHub 下载 Agent: ${AGENT_URL}"
-    curl -L -o "/tmp/${AGENT_ZIP_NAME}" "${AGENT_URL}" || { err "下载失败！"; exit 1; }
-    
-    info "创建并解压到目录: ${INSTALL_PATH}"
+install_instance() {
+    local idx=$1
+    INSTALL_PATH="/opt/nezha-fake-$idx"
+    CONFIG_FILE="$INSTALL_PATH/config.yaml"
+    info "安装实例 $idx 到 $INSTALL_PATH"
     mkdir -p "$INSTALL_PATH"
-    unzip -o "/tmp/${AGENT_ZIP_NAME}" -d "$INSTALL_PATH" || { err "解压失败！"; rm -rf "$INSTALL_PATH"; exit 1; }
-    
-    agent_exec_name=$(unzip -Z1 "/tmp/${AGENT_ZIP_NAME}" | head -n 1 | tr -d '\r')
-    if [ -z "$agent_exec_name" ] || [ ! -f "${INSTALL_PATH}/${agent_exec_name}" ]; then
-        err "严重错误：无法在压缩包中找到或验证可执行文件！"; rm -rf "$INSTALL_PATH"; rm "/tmp/${AGENT_ZIP_NAME}"; exit 1
-    fi
-    info "检测到可执行文件: '${agent_exec_name}'"
-    
-    chmod +x "${INSTALL_PATH}/${agent_exec_name}"
-    rm "/tmp/${AGENT_ZIP_NAME}"
-    
-    info "正在根据官方示例创建 config.yaml..."
-    cat > "${INSTALL_PATH}/config.yaml" <<EOF
-# 由一键安装脚本生成
+    download_agent "$AGENT_URL" "/tmp/nezha-agent-fake.zip"
+    unzip -o "/tmp/nezha-agent-fake.zip" -d "$INSTALL_PATH"
+    rm "/tmp/nezha-agent-fake.zip"
+    agent_exec_name=$(ls "$INSTALL_PATH" | head -n1)
+    [[ -x "$INSTALL_PATH/$agent_exec_name" ]] || { err "找不到可执行文件"; exit 1; }
+    chmod +x "$INSTALL_PATH/$agent_exec_name"
+
+    CPU=$(random_choice "${CPU_LIST[@]}")
+    ARCH=$(random_choice "amd64" "arm64")
+    PLATFORM=$(random_choice "${PLATFORM_LIST[@]}")
+    DISK_TOTAL=$(random_disk)
+    MEM_TOTAL=$(random_mem)
+    DISK_MULTI=$(random_multiplier 1 2)
+    MEM_MULTI=$(random_multiplier 1 3)
+    IP=$(generate_geoip_ip)
+
+    UPLOAD_MULTI=$(random_multiplier 1 50)
+    DOWNLOAD_MULTI=$(random_multiplier 1 50)
+    UPLOAD_TOTAL=$(random_traffic)
+    DOWNLOAD_TOTAL=$(random_traffic)
+
+    cat > "$CONFIG_FILE" <<EOF
 disable_auto_update: true
 fake: true
 version: 6.6.6
-arch: "${FAKE_ARCH:-taishan64}"
-cpu: "${FAKE_CPU:-HUAWEI Kirin 9000sm 256 Physical Core}"
-platform: "${FAKE_PLATFORM:-HarmonyOS NEXT}"
-disktotal: ${FAKE_DISK_TOTAL:-219902325555200}
-memtotal: ${MEM_TOTAL:-549755813888}
-diskmultiple: ${DISK_MULTI:-10}
-memmultiple: ${MEM_MULTI:-20}
-networkmultiple: ${NETWORK_MULTI:-1000}
-ip: "${FAKE_IP:-1.1.1.1}"
+arch: $ARCH
+cpu: "$CPU"
+platform: "$PLATFORM"
+disktotal: $DISK_TOTAL
+memtotal: $MEM_TOTAL
+diskmultiple: $DISK_MULTI
+memmultiple: $MEM_MULTI
+network_upload_multiple: $UPLOAD_MULTI
+network_download_multiple: $DOWNLOAD_MULTI
+network_upload_total: $UPLOAD_TOTAL
+network_download_total: $DOWNLOAD_TOTAL
+ip: $IP
 EOF
 
-    # 准备启动命令
-    start_cmd="env NZ_SERVER=\"${NZ_SERVER}\" NZ_CLIENT_SECRET=\"${NZ_CLIENT_SECRET}\" NZ_TLS=\"${NZ_TLS}\" ${INSTALL_PATH}/${agent_exec_name} -c ${INSTALL_PATH}/config.yaml"
+    cat > "/etc/systemd/system/nezha-fake-agent-$idx.service" <<SERVICE
+[Unit]
+Description=Fake Nezha Agent $idx
+After=network.target
+[Service]
+Type=simple
+WorkingDirectory=$INSTALL_PATH
+Environment=NZ_SERVER=${NZ_SERVER}
+Environment=NZ_CLIENT_SECRET=${NZ_CLIENT_SECRET}
+Environment=NZ_TLS=${NZ_TLS}
+ExecStart=$INSTALL_PATH/$agent_exec_name -c $CONFIG_FILE
+Restart=always
+RestartSec=5
+[Install]
+WantedBy=multi-user.target
+SERVICE
 
-    info "正在启动 screen 会话以在后台运行 Agent..."
-    screen -dmS "$SESSION_NAME" bash -c "${start_cmd}"
-
-    sleep 2
-    if screen -ls | grep -q "$SESSION_NAME"; then
-        info "Agent 已在 screen 会话中成功启动！"
-        # 添加开机自启
-        info "正在添加开机自启任务..."
-        (crontab -l 2>/dev/null | grep -v "${INSTALL_PATH}"; echo "@reboot screen -dmS ${SESSION_NAME} bash -c '${start_cmd}'") | crontab -
-        
-        success "Fake Nezha Agent 安装并配置开机自启成功！"
-        info "现在可以去您的哪吒面板查看效果了。"
-        info ""
-        info "--- Agent 管理命令 ---"
-        info "查看运行日志: screen -r ${SESSION_NAME}"
-        info "(查看后按 Ctrl+A, 再按 D 即可退出日志界面)"
-        info "停止 Agent:  screen -S ${SESSION_NAME} -X quit"
-        info "手动启动:    screen -dmS ${SESSION_NAME} bash -c '${start_cmd}'"
-        info "--------------------"
-    else
-        err "服务启动失败！这非常意外。"
-        err "请尝试手动运行启动命令查看报错: "
-        err "${start_cmd}"
-    fi
+    systemctl daemon-reload
+    systemctl enable --now "nezha-fake-agent-$idx"
+    success "实例 $idx 安装完成 (IP: $IP, CPU: $CPU, 平台: $PLATFORM)"
 }
 
-uninstall_agent() {
-    info "开始卸载 Fake Nezha Agent..."
-    check_root
-    cleanup_old_install
+# ===== 修改单个实例配置 =====
+modify_config() {
+    local target=$1
+    local config_file="/opt/nezha-fake-$target/config.yaml"
+    [[ -f "$config_file" ]] || { err "找不到配置文件 $config_file"; return; }
+
+    read -rp "请输入 CPU 型号 (直接回车保持不变): " new_cpu
+    read -rp "请输入内存大小(GB): " new_mem
+    read -rp "请输入硬盘大小(GB): " new_disk
+    read -rp "请输入上传带宽倍数: " new_up
+    read -rp "请输入下载带宽倍数: " new_down
+
+    [[ -n "$new_cpu" ]] && sed -i "s|^cpu:.*|cpu: \"$new_cpu\"|" "$config_file"
+    [[ -n "$new_mem" ]] && sed -i "s|^memtotal:.*|memtotal: $((new_mem * 1024 * 1024 * 1024))|" "$config_file"
+    [[ -n "$new_disk" ]] && sed -i "s|^disktotal:.*|disktotal: $((new_disk * 1024 * 1024 * 1024))|" "$config_file"
+    [[ -n "$new_up" ]] && sed -i "s|^network_upload_multiple:.*|network_upload_multiple: $new_up|" "$config_file"
+    [[ -n "$new_down" ]] && sed -i "s|^network_download_multiple:.*|network_download_multiple: $new_down|" "$config_file"
+
+    systemctl restart "nezha-fake-agent-$target"
+    success "实例 $target 配置已更新并重启"
+}
+
+# ===== 批量修改所有实例配置 =====
+modify_all() {
+    read -rp "请输入 CPU 型号 (直接回车保持不变): " new_cpu
+    read -rp "请输入内存大小(GB，直接回车保持不变): " new_mem
+    read -rp "请输入硬盘大小(GB，直接回车保持不变): " new_disk
+    read -rp "请输入上传倍数(直接回车保持不变): " new_up
+    read -rp "请输入下载倍数(直接回车保持不变): " new_down
+
+    local any_found=false
+    local modified_instances=()
+
+    for config in /opt/nezha-fake-*/config.yaml; do
+        [[ -f "$config" ]] || continue
+        any_found=true
+        idx=$(basename "$(dirname "$config")" | awk -F- '{print $3}')
+
+        [[ -n "$new_cpu" ]] && sed -i "s|^cpu:.*|cpu: \"$new_cpu\"|" "$config"
+        [[ -n "$new_mem" ]] && sed -i "s|^memtotal:.*|memtotal: $((new_mem * 1024 * 1024 * 1024))|" "$config"
+        [[ -n "$new_disk" ]] && sed -i "s|^disktotal:.*|disktotal: $((new_disk * 1024 * 1024 * 1024))|" "$config"
+        [[ -n "$new_up" ]] && sed -i "s|^network_upload_multiple:.*|network_upload_multiple: $new_up|" "$config"
+        [[ -n "$new_down" ]] && sed -i "s|^network_download_multiple:.*|network_download_multiple: $new_down|" "$config"
+
+        modified_instances+=("$idx")
+    done
+
+    if ! $any_found; then
+        info "没有找到任何实例配置文件可修改"
+        return
+    fi
+
+    # 批量重启所有修改过的实例
+    for idx in "${modified_instances[@]}"; do
+        systemctl restart "nezha-fake-agent-$idx" 2>/dev/null || err "实例 $idx 重启失败"
+        success "实例 $idx 配置已更新并重启"
+    done
+}
+
+# ===== 其他操作 =====
+uninstall_all() {
+    read -rp "确认要卸载所有实例吗？(y/n): " confirm
+    [[ "$confirm" != "y" && "$confirm" != "Y" ]] && return
+    for service in /etc/systemd/system/nezha-fake-agent-*.service; do
+        [[ -f "$service" ]] || continue
+        name=$(basename "$service" .service)
+        systemctl stop "$name"
+        systemctl disable "$name"
+        rm -f "$service"
+    done
+    rm -rf /opt/nezha-fake-*
+    systemctl daemon-reload
+    success "所有实例已卸载完成"
+}
+
+show_status_all() {
+    echo "========= Fake Agent 状态 ========="
+    for service in /etc/systemd/system/nezha-fake-agent-*.service; do
+        [[ -f "$service" ]] || continue
+        name=$(basename "$service" .service)
+        state=$(systemctl is-active "$name")
+        echo "$name : $state"
+    done
+    echo "=================================="
+}
+
+restart_all() {
+    echo "正在重启所有实例..."
+    for service in /etc/systemd/system/nezha-fake-agent-*.service; do
+        [[ -f "$service" ]] || continue
+        name=$(basename "$service" .service)
+        systemctl restart "$name"
+    done
+    success "所有实例已重启完成"
+}
+
+stop_all() {
+    echo "正在停止所有实例..."
+    for service in /etc/systemd/system/nezha-fake-agent-*.service; do
+        [[ -f "$service" ]] || continue
+        name=$(basename "$service" .service)
+        systemctl stop "$name"
+    done
+    success "所有实例已停止"
 }
 
 main() {
     clear
-    echo "========================================="
-    echo "  Fake Nezha Agent 一键管理脚本 (v1.0.0)"
-    echo "         (开机自启稳定版)"
-    echo "========================================="
+    echo "=============================="
+    echo "  Fake Nezha 批量管理脚本"
+    echo "=============================="
+    check_root
+    check_and_install_deps
+    detect_arch
     echo ""
-    read -rp "请选择要执行的操作: [1]安装 [2]卸载 [0]退出: " option
-    case "$option" in
-        1) install_agent ;;
-        2) uninstall_agent ;;
-        0) exit 0 ;;
-        *) err "无效的选项" ;;
+    echo "请选择操作:"
+    echo "1) 批量安装实例"
+    echo "2) 卸载所有实例"
+    echo "3) 查看所有实例运行状态"
+    echo "4) 重启所有实例"
+    echo "5) 停止所有实例"
+    echo "6) 批量修改所有实例配置"
+    echo "7) 修改单个实例配置"
+    read -rp "请输入选项 [1-7]: " op
+
+    case "$op" in
+        1)
+            parse_install_cmd
+            read -rp "请输入要生成实例数量 (N): " N
+            for i in $(seq 1 $N); do
+                cleanup_instance $i
+                install_instance $i
+            done
+            success "全部 $N 个实例安装完成！"
+            ;;
+        2) uninstall_all ;;
+        3) show_status_all ;;
+        4) restart_all ;;
+        5) stop_all ;;
+        6) modify_all ;;
+        7)
+            read -rp "请输入要修改的实例编号: " idx
+            modify_config $idx
+            ;;
+        *) err "无效选项" ;;
     esac
 }
 
